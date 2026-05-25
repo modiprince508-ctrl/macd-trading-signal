@@ -1,4 +1,6 @@
 from urllib.parse import urlencode
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import re
 
 import pandas as pd
@@ -34,14 +36,16 @@ st.markdown(
             --line: rgba(255, 255, 255, 0.08);
             --text-soft: #9fb0bf;
             --accent: #27d3a2;
+            --gold: #d6b45d;
             --danger: #ff5b6e;
             --amber: #f0b84d;
         }
 
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(39, 211, 162, 0.10), transparent 30rem),
-                linear-gradient(135deg, #071015 0%, #0a1118 45%, #0e171d 100%);
+                radial-gradient(circle at top left, rgba(214, 180, 93, 0.13), transparent 28rem),
+                radial-gradient(circle at 80% 10%, rgba(39, 211, 162, 0.08), transparent 26rem),
+                linear-gradient(135deg, #060b0f 0%, #0a1118 45%, #11181f 100%);
             color: #edf5f7;
         }
 
@@ -66,10 +70,10 @@ st.markdown(
         }
 
         .terminal-hero {
-            border: 1px solid var(--line);
+            border: 1px solid rgba(214, 180, 93, 0.26);
             border-radius: 8px;
-            padding: 22px 24px;
-            background: linear-gradient(145deg, rgba(16, 24, 32, 0.96), rgba(10, 17, 24, 0.96));
+            padding: 26px 28px;
+            background: linear-gradient(145deg, rgba(20, 28, 34, 0.98), rgba(8, 15, 20, 0.98));
             box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
             margin-bottom: 18px;
         }
@@ -98,8 +102,8 @@ st.markdown(
         }
 
         .metric-card {
-            border: 1px solid var(--line);
-            background: rgba(16, 24, 32, 0.88);
+            border: 1px solid rgba(214, 180, 93, 0.14);
+            background: linear-gradient(150deg, rgba(17, 27, 34, 0.95), rgba(10, 18, 24, 0.95));
             border-radius: 8px;
             padding: 15px 16px;
             min-height: 112px;
@@ -189,11 +193,18 @@ st.markdown(
         }
 
         .setup-card {
-            border: 1px solid var(--line);
+            border: 1px solid rgba(214, 180, 93, 0.14);
             background: linear-gradient(145deg, rgba(16, 24, 32, 0.92), rgba(13, 23, 30, 0.92));
             border-radius: 8px;
             padding: 16px;
             min-height: 132px;
+        }
+
+        .scanner-shell {
+            border: 1px solid rgba(214, 180, 93, 0.18);
+            background: rgba(12, 20, 26, 0.74);
+            border-radius: 8px;
+            padding: 12px 14px;
         }
 
         .setup-action {
@@ -278,6 +289,8 @@ INTERVAL_OPTIONS = {
     "5 Minutes": "5m",
     "15 Minutes": "15m",
     "30 Minutes": "30m",
+    "1 Hour": "1h",
+    "4 Hours": "4h",
     "1 Day": "1d",
 }
 
@@ -323,6 +336,170 @@ def calculate_atr(data, period=14):
     low_close = (data["low"] - data["close"].shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+def format_ist_time(value):
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        else:
+            value = value.astimezone(ZoneInfo("Asia/Kolkata"))
+        return value.strftime("%Y-%m-%d %H:%M IST")
+    return str(value)
+
+
+def detect_candlestick_pattern(data):
+    if data is None or len(data) < 3:
+        return "Neutral", "None"
+
+    current = data.iloc[-1]
+    previous = data.iloc[-2]
+    body = abs(float(current["close"] - current["open"]))
+    candle_range = max(float(current["high"] - current["low"]), 0.01)
+    upper_wick = float(current["high"] - max(current["open"], current["close"]))
+    lower_wick = float(min(current["open"], current["close"]) - current["low"])
+
+    bullish_engulfing = (
+        current["close"] > current["open"]
+        and previous["close"] < previous["open"]
+        and current["close"] >= previous["open"]
+        and current["open"] <= previous["close"]
+    )
+    bearish_engulfing = (
+        current["close"] < current["open"]
+        and previous["close"] > previous["open"]
+        and current["open"] >= previous["close"]
+        and current["close"] <= previous["open"]
+    )
+    hammer = lower_wick >= body * 2 and upper_wick <= body * 0.8 and current["close"] > current["open"]
+    shooting_star = upper_wick >= body * 2 and lower_wick <= body * 0.8 and current["close"] < current["open"]
+
+    if bullish_engulfing:
+        return "Bullish", "Bullish Engulfing"
+    if bearish_engulfing:
+        return "Bearish", "Bearish Engulfing"
+    if hammer:
+        return "Bullish", "Hammer"
+    if shooting_star:
+        return "Bearish", "Shooting Star"
+    if body / candle_range < 0.18:
+        return "Neutral", "Doji / Indecision"
+    return "Neutral", "No strong candle pattern"
+
+
+def detect_chart_pattern(data):
+    if data is None or len(data) < 30:
+        return "Neutral", "Not enough candles"
+
+    latest = data.iloc[-1]
+    previous_window = data.iloc[-21:-1]
+    recent = data.tail(8)
+    resistance = float(previous_window["high"].max())
+    support = float(previous_window["low"].min())
+    higher_lows = recent["low"].iloc[-1] > recent["low"].iloc[0]
+    lower_highs = recent["high"].iloc[-1] < recent["high"].iloc[0]
+
+    if float(latest["close"]) > resistance:
+        return "Bullish", "20-candle breakout"
+    if float(latest["close"]) < support:
+        return "Bearish", "20-candle breakdown"
+    if higher_lows and float(latest["close"]) > float(data["ema_slow"].iloc[-1]):
+        return "Bullish", "Higher-low uptrend"
+    if lower_highs and float(latest["close"]) < float(data["ema_slow"].iloc[-1]):
+        return "Bearish", "Lower-high downtrend"
+    return "Neutral", "Range / no clear pattern"
+
+
+def build_signal_confirmation(data, raw_signal=None):
+    if data is None or len(data) < 35:
+        return {
+            "confirmed_signal": "WAIT",
+            "score": 0,
+            "candle_pattern": "Not enough data",
+            "chart_pattern": "Not enough data",
+            "reason": "Not enough candles for confirmation",
+        }
+
+    latest = data.iloc[-1]
+    previous = data.iloc[-2]
+    previous_diff = float(previous["macd"] - previous["signal"])
+    latest_diff = float(latest["macd"] - latest["signal"])
+
+    if raw_signal is None:
+        if previous_diff <= 0 < latest_diff:
+            raw_signal = "BUY"
+        elif previous_diff >= 0 > latest_diff:
+            raw_signal = "SELL"
+        else:
+            raw_signal = "WAIT"
+
+    candle_bias, candle_pattern = detect_candlestick_pattern(data)
+    chart_bias, chart_pattern = detect_chart_pattern(data)
+    rsi_series = calculate_rsi(data["close"])
+    rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else 50.0
+    close = float(latest["close"])
+    ema_slow = float(latest["ema_slow"])
+    hist = float(latest["hist"])
+    volume_avg = float(data["volume"].tail(20).mean()) if "volume" in data and len(data) >= 20 else 0
+    volume_ok = volume_avg == 0 or float(latest.get("volume", 0)) >= volume_avg * 0.8
+
+    score = 0
+    reasons = []
+    if raw_signal == "BUY":
+        if candle_bias == "Bullish":
+            score += 1
+            reasons.append(candle_pattern)
+        if chart_bias == "Bullish":
+            score += 1
+            reasons.append(chart_pattern)
+        if close > ema_slow and hist > 0 and 38 <= rsi <= 72:
+            score += 1
+            reasons.append("trend + RSI confirm")
+        if volume_ok:
+            score += 1
+            reasons.append("volume acceptable")
+        confirmed = "BUY" if score >= 2 and candle_bias != "Bearish" else "WAIT"
+    elif raw_signal == "SELL":
+        if candle_bias == "Bearish":
+            score += 1
+            reasons.append(candle_pattern)
+        if chart_bias == "Bearish":
+            score += 1
+            reasons.append(chart_pattern)
+        if close < ema_slow and hist < 0 and rsi <= 62:
+            score += 1
+            reasons.append("trend + RSI confirm")
+        if volume_ok:
+            score += 1
+            reasons.append("volume acceptable")
+        confirmed = "SELL" if score >= 2 and candle_bias != "Bullish" else "WAIT"
+    else:
+        confirmed = "WAIT"
+        reasons.append("no latest MACD crossover")
+
+    return {
+        "confirmed_signal": confirmed,
+        "score": score,
+        "candle_pattern": candle_pattern,
+        "chart_pattern": chart_pattern,
+        "reason": ", ".join(reasons) if reasons else "confirmation not strong enough",
+    }
+
+
+def apply_confirmed_signals(data):
+    if data is None or data.empty:
+        return data
+    data = data.copy()
+    data["raw_trade_signal"] = data["trade_signal"]
+    confirmation = build_signal_confirmation(data)
+    data.at[data.index[-1], "trade_signal"] = confirmation["confirmed_signal"]
+    data.at[data.index[-1], "candle_pattern"] = confirmation["candle_pattern"]
+    data.at[data.index[-1], "chart_pattern"] = confirmation["chart_pattern"]
+    data.at[data.index[-1], "confirmation_score"] = confirmation["score"]
+    data.at[data.index[-1], "confirmation_reason"] = confirmation["reason"]
+    return data
 
 
 def build_trade_setup(data):
@@ -568,35 +745,30 @@ def detect_macd_change(data):
 
     analyzed = calculate_macd(data)
     analyzed = generate_signals(analyzed)
-    latest = analyzed.iloc[-1]
-    previous = analyzed.iloc[-2]
-    previous_diff = float(previous["macd"] - previous["signal"])
-    latest_diff = float(latest["macd"] - latest["signal"])
-
-    if previous_diff <= 0 < latest_diff:
-        signal = "BUY"
-    elif previous_diff >= 0 > latest_diff:
-        signal = "SELL"
-    else:
-        signal = None
-
-    if signal is None:
+    confirmation = build_signal_confirmation(analyzed)
+    if confirmation["confirmed_signal"] not in ("BUY", "SELL"):
         return None
 
+    latest = analyzed.iloc[-1]
     return {
-        "signal": signal,
+        "signal": confirmation["confirmed_signal"],
+        "confirmation_score": confirmation["score"],
+        "candle_pattern": confirmation["candle_pattern"],
+        "chart_pattern": confirmation["chart_pattern"],
+        "confirmation": confirmation["reason"],
         "price": round(float(latest["close"]), 2),
         "macd": round(float(latest["macd"]), 4),
         "signal_line": round(float(latest["signal"]), 4),
         "histogram": round(float(latest["hist"]), 4),
-        "date": latest.name.strftime("%Y-%m-%d %H:%M") if hasattr(latest.name, "strftime") else str(latest.name),
+        "date": format_ist_time(latest.name),
     }
 
 
-def run_macd_scan(records, interval):
+def run_macd_scan(records, interval, interval_label):
     results = []
     progress_bar = st.progress(0)
     status = st.empty()
+    scan_time = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST")
 
     for idx, record in enumerate(records):
         status.caption(f"Scanning {idx + 1}/{len(records)}: {record['symbol']}")
@@ -609,6 +781,8 @@ def run_macd_scan(records, interval):
                     "company_name": record["company_name"],
                     "exchange": record["exchange"],
                     "yahoo_symbol": record["yahoo_symbol"],
+                    "timeframe": interval_label,
+                    "scan_time": scan_time,
                     **macd_change,
                 }
             )
@@ -655,14 +829,17 @@ def render_quote_cards(quotes):
                 f"""
                 <div class="metric-card">
                     <div class="metric-label">{quote['symbol']}</div>
-                    <div class="metric-value">₹{quote['price']:,.2f}</div>
-                    <div class="{direction_class}">
-                        {quote['change']:+.2f} ({quote['change_pct']:+.2f}%)
-                    </div>
+                <div class="metric-value">₹{quote['price']:,.2f}</div>
+                <div class="{direction_class}">
+                    {quote['change']:+.2f} ({quote['change_pct']:+.2f}%)
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                <div style="color:#6f8494;font-size:0.72rem;margin-top:10px;">
+                    Updated {quote.get('updated_at', 'recently')}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def build_plotly_chart(data, company, symbol, selected_interval_label, trade_setup=None):
@@ -798,9 +975,22 @@ def build_plotly_chart(data, company, symbol, selected_interval_label, trade_set
     return fig
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=1)
 def cached_market_snapshot():
     return fetch_quote_snapshot(MARKET_SYMBOLS)
+
+
+def render_market_overview_header(live_mode=False):
+    st.markdown('<div class="section-title">Market Overview</div>', unsafe_allow_html=True)
+    if live_mode:
+        st.caption("Broker-style live mode: refreshing every 1 second. Price changes depend on the data feed.")
+
+
+@st.fragment(run_every=1)
+def render_live_market_overview():
+    cached_market_snapshot.clear()
+    render_market_overview_header(live_mode=True)
+    render_quote_cards(cached_market_snapshot())
 
 
 @st.cache_data(ttl=900)
@@ -817,6 +1007,8 @@ if "selected_record" not in st.session_state:
     st.session_state.selected_record = None
 if "search_query" not in st.session_state:
     st.session_state.search_query = ""
+if "scan_history" not in st.session_state:
+    st.session_state.scan_history = pd.DataFrame()
 if st.session_state.selected_record is None:
     default_matches = search_companies("RELIANCE", "indian_stocks.csv", 1)
     if default_matches:
@@ -866,6 +1058,16 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.markdown("### Live Market")
+    auto_refresh_market = st.toggle("1-sec live prices", value=False)
+    if st.button("Refresh Prices", width="stretch"):
+        cached_market_snapshot.clear()
+        st.rerun()
+
+    if auto_refresh_market:
+        st.caption("Market Overview refreshes every second.")
+
+    st.divider()
     selected_interval_label = st.selectbox("Timeframe", list(INTERVAL_OPTIONS.keys()), index=2)
     selected_interval = INTERVAL_OPTIONS[selected_interval_label]
 
@@ -893,8 +1095,11 @@ st.markdown(
 )
 
 
-st.markdown('<div class="section-title">Market Overview</div>', unsafe_allow_html=True)
-render_quote_cards(cached_market_snapshot())
+if auto_refresh_market:
+    render_live_market_overview()
+else:
+    render_market_overview_header()
+    render_quote_cards(cached_market_snapshot())
 
 with st.expander("MACD Signal Scanner - paste up to 250 stocks", expanded=True):
     scan_left, scan_right = st.columns([1.25, 0.75])
@@ -913,7 +1118,7 @@ with st.expander("MACD Signal Scanner - paste up to 250 stocks", expanded=True):
             key="scanner_interval",
         )
         scan_only_message = st.caption(
-            "Scanner returns only stocks where MACD crossed signal line on the latest candle."
+            "Scanner returns only MACD crosses confirmed by candle pattern, chart pattern, trend, or volume."
         )
         scan_button = st.button("Scan MACD Changes", width="stretch", type="primary")
 
@@ -935,7 +1140,13 @@ with st.expander("MACD Signal Scanner - paste up to 250 stocks", expanded=True):
                 st.warning(f"Could not match {len(missing_symbols)} symbol(s): {', '.join(missing_symbols[:12])}")
 
             if records:
-                st.session_state.scan_results = run_macd_scan(records, INTERVAL_OPTIONS[scan_interval_label])
+                new_results = run_macd_scan(records, INTERVAL_OPTIONS[scan_interval_label], scan_interval_label)
+                st.session_state.scan_results = new_results
+                if not new_results.empty:
+                    st.session_state.scan_history = pd.concat(
+                        [new_results, st.session_state.scan_history],
+                        ignore_index=True,
+                    )
                 st.session_state.scan_interval_label = scan_interval_label
             else:
                 st.session_state.scan_results = pd.DataFrame()
@@ -947,8 +1158,20 @@ with st.expander("MACD Signal Scanner - paste up to 250 stocks", expanded=True):
         else:
             st.success(f"Found {len(results)} MACD crossover stock(s).")
             display_results = results[
-                ["signal", "symbol", "company_name", "price", "macd", "signal_line", "histogram", "date"]
+                [
+                    "signal",
+                    "symbol",
+                    "company_name",
+                    "timeframe",
+                    "price",
+                    "confirmation_score",
+                    "candle_pattern",
+                    "chart_pattern",
+                    "confirmation",
+                    "date",
+                ]
             ].copy()
+            display_results.index = range(1, len(display_results) + 1)
             st.dataframe(display_results, width="stretch", height=320)
 
             result_options = results.to_dict("records")
@@ -968,6 +1191,25 @@ with st.expander("MACD Signal Scanner - paste up to 250 stocks", expanded=True):
                 st.session_state.data = None
                 st.rerun()
 
+    if not st.session_state.scan_history.empty:
+        st.markdown('<div class="section-title">Previous Scan Results</div>', unsafe_allow_html=True)
+        history_display = st.session_state.scan_history[
+            [
+                "signal",
+                "symbol",
+                "company_name",
+                "timeframe",
+                "price",
+                "confirmation_score",
+                "candle_pattern",
+                "chart_pattern",
+                "scan_time",
+                "date",
+            ]
+        ].copy()
+        history_display.index = range(1, len(history_display) + 1)
+        st.dataframe(history_display, width="stretch", height=360)
+
 
 if st.session_state.selected_record and fetch_button:
     selected_record = st.session_state.selected_record
@@ -977,6 +1219,7 @@ if st.session_state.selected_record and fetch_button:
         if data is not None and len(data) > 0:
             data = calculate_macd(data)
             data = generate_signals(data)
+            data = apply_confirmed_signals(data)
             st.session_state.data = data
             st.session_state.company = selected_record["company_name"]
             st.session_state.symbol = yahoo_symbol
@@ -997,6 +1240,7 @@ if st.session_state.selected_record and (
         if data is not None and len(data) > 0:
             data = calculate_macd(data)
             data = generate_signals(data)
+            data = apply_confirmed_signals(data)
             st.session_state.data = data
             st.session_state.company = selected_record["company_name"]
             st.session_state.symbol = yahoo_symbol
@@ -1076,12 +1320,24 @@ if "data" in st.session_state and st.session_state.data is not None:
 
     if latest:
         signal_text = "BUY" if latest["signal"] == "BUY" else "SELL" if latest["signal"] == "SELL" else "NEUTRAL"
+        latest_row = data.iloc[-1]
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Signal", signal_text)
         col2.metric("Last Price", f"₹{latest['price']:.2f}")
         col3.metric("MACD", f"{latest['macd']:.4f}")
         col4.metric("Signal Line", f"{latest['signal_line']:.4f}")
         col5.metric("Histogram", f"{latest['histogram']:.4f}")
+        st.markdown(
+            f"""
+            <div class="setup-card" style="margin: 10px 0 12px 0;">
+                <div class="analysis-row"><span class="analysis-label">Confirmed By</span><span class="analysis-value">{latest_row.get('confirmation_reason', 'No confirmation available')}</span></div>
+                <div class="analysis-row"><span class="analysis-label">Candlestick Pattern</span><span class="analysis-value">{latest_row.get('candle_pattern', 'N/A')}</span></div>
+                <div class="analysis-row"><span class="analysis-label">Chart Pattern</span><span class="analysis-value">{latest_row.get('chart_pattern', 'N/A')}</span></div>
+                <div class="analysis-row"><span class="analysis-label">Confirmation Score</span><span class="analysis-value">{int(latest_row.get('confirmation_score', 0))}/4</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     setup_col, investment_col = st.columns([1, 1])
     with setup_col:
@@ -1176,6 +1432,7 @@ if "data" in st.session_state and st.session_state.data is not None:
         st.markdown('<div class="section-title">Recent Signals</div>', unsafe_allow_html=True)
         signals_table = get_last_n_signals(data, 20)
         if signals_table is not None:
+            signals_table.index = range(1, len(signals_table) + 1)
             st.dataframe(signals_table, width="stretch", height=360)
         else:
             st.info("No signals generated.")
@@ -1191,6 +1448,7 @@ if "data" in st.session_state and st.session_state.data is not None:
 
             trade_history = get_trade_history(data)
             if trade_history is not None:
+                trade_history.index = range(1, len(trade_history) + 1)
                 st.dataframe(trade_history, width="stretch", height=242)
             else:
                 st.info("No completed BUY to SELL cycles in this period.")

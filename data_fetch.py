@@ -17,16 +17,19 @@ def fetch_stock_data(yahoo_symbol, interval):
         '5m': '30d',
         '15m': '60d',
         '30m': '60d',
+        '1h': '730d',
+        '4h': '730d',
         '1d': '2y'
     }
     period = period_map.get(interval, '30d')
+    download_interval = '1h' if interval == '4h' else interval
 
     try:
-        data = yf.download(yahoo_symbol, period=period, interval=interval, progress=False)
+        data = yf.download(yahoo_symbol, period=period, interval=download_interval, progress=False)
 
         if data.empty:
             ticker = yf.Ticker(yahoo_symbol)
-            data = ticker.history(period=period, interval=interval)
+            data = ticker.history(period=period, interval=download_interval)
 
         if data.empty:
             return None
@@ -64,6 +67,15 @@ def fetch_stock_data(yahoo_symbol, interval):
 
         if col_map:
             data = data.rename(columns=col_map)
+
+        if interval == '4h':
+            data = data.resample('4h').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
         return data
     except Exception as e:
         print(f"Error fetching data: {e}")
@@ -151,13 +163,17 @@ def fetch_quote_snapshot(yahoo_symbols):
     for yahoo_symbol in yahoo_symbols:
         try:
             ticker = yf.Ticker(yahoo_symbol)
-            history = ticker.history(period='5d', interval='1d')
-            if history.empty:
+            intraday = ticker.history(period='1d', interval='1m')
+            daily = ticker.history(period='5d', interval='1d')
+
+            if intraday.empty and daily.empty:
                 continue
 
-            latest = history.iloc[-1]
-            previous_close = history['Close'].iloc[-2] if len(history) > 1 else latest['Close']
-            change = latest['Close'] - previous_close
+            latest_source = intraday if not intraday.empty else daily
+            latest = latest_source.iloc[-1]
+            latest_time = latest_source.index[-1]
+            previous_close = daily['Close'].iloc[-2] if len(daily) > 1 else latest['Close']
+            change = float(latest['Close']) - float(previous_close)
             change_pct = (change / previous_close * 100) if previous_close else 0
 
             snapshots.append({
@@ -165,7 +181,8 @@ def fetch_quote_snapshot(yahoo_symbols):
                 'price': round(float(latest['Close']), 2),
                 'change': round(float(change), 2),
                 'change_pct': round(float(change_pct), 2),
-                'volume': int(latest['Volume']) if 'Volume' in latest and pd.notna(latest['Volume']) else 0
+                'volume': int(latest['Volume']) if 'Volume' in latest and pd.notna(latest['Volume']) else 0,
+                'updated_at': latest_time.strftime('%Y-%m-%d %H:%M IST') if hasattr(latest_time, 'strftime') else str(latest_time)
             })
         except Exception as e:
             print(f"Error fetching quote snapshot for {yahoo_symbol}: {e}")

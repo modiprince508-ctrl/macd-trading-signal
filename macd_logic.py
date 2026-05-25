@@ -1,5 +1,16 @@
 import pandas as pd
 import numpy as np
+from zoneinfo import ZoneInfo
+
+
+def format_ist_index(value):
+    if hasattr(value, "tzinfo"):
+        if value.tzinfo is None:
+            value = value.tz_localize("Asia/Kolkata") if hasattr(value, "tz_localize") else value
+        else:
+            value = value.tz_convert("Asia/Kolkata") if hasattr(value, "tz_convert") else value.astimezone(ZoneInfo("Asia/Kolkata"))
+        return value.strftime('%Y-%m-%d %H:%M IST')
+    return str(value)
 
 def EMA(series, period):
     """Calculate Exponential Moving Average"""
@@ -100,7 +111,7 @@ def get_latest_signal(df):
     
     latest = df.iloc[-1]
     return {
-        'date': latest.name.strftime('%Y-%m-%d'),
+        'date': format_ist_index(latest.name),
         'signal': latest['trade_signal'],
         'price': latest['close'],
         'macd': latest['macd'],
@@ -114,7 +125,7 @@ def get_last_n_signals(df, n=20):
         return None
     
     signals_df = df[['close', 'macd', 'signal', 'hist', 'trade_signal']].tail(n).copy()
-    signals_df['date'] = signals_df.index.strftime('%Y-%m-%d')
+    signals_df['date'] = [format_ist_index(idx) for idx in signals_df.index]
     signals_df['close'] = signals_df['close'].round(2)
     signals_df['macd'] = signals_df['macd'].round(4)
     signals_df['signal'] = signals_df['signal'].round(4)
