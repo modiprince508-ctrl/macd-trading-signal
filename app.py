@@ -14,6 +14,7 @@ from data_fetch import (
     fetch_quote_snapshot,
     fetch_stock_data,
     fetch_stock_news,
+    get_data_provider_status,
     search_companies,
 )
 from macd_logic import calculate_macd, generate_signals, get_last_n_signals, get_latest_signal
@@ -1018,6 +1019,7 @@ if st.session_state.selected_record is None:
 with st.sidebar:
     st.markdown("### MarketDesk India")
     st.caption("NSE scanner, MACD engine, market charting")
+    st.caption(f"Data: {get_data_provider_status()}")
 
     st.markdown("#### Quick Load")
     quick_cols = st.columns(2)

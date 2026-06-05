@@ -1,5 +1,230 @@
 import yfinance as yf
 import pandas as pd
+import os
+from datetime import datetime, timedelta
+from functools import lru_cache
+from zoneinfo import ZoneInfo
+
+import requests
+
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
+try:
+    import pyotp
+    from SmartApi import SmartConnect
+except Exception:
+    pyotp = None
+    SmartConnect = None
+
+
+ANGEL_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+_ANGEL_CLIENT = None
+
+
+def _get_secret(section, key, env_name=None):
+    if st is not None:
+        try:
+            value = st.secrets.get(section, {}).get(key)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    return os.getenv(env_name or f"{section}_{key}".upper())
+
+
+def get_data_provider_status():
+    """Return the active/available market data provider status."""
+    config = _get_angel_config()
+    if not config["ready"]:
+        return "Yahoo Finance fallback"
+    if SmartConnect is None or pyotp is None:
+        return "Yahoo Finance fallback (install smartapi-python + pyotp)"
+    return "Angel One SmartAPI"
+
+
+def _get_angel_config():
+    config = {
+        "api_key": _get_secret("angel_one", "api_key", "ANGEL_ONE_API_KEY"),
+        "client_code": _get_secret("angel_one", "client_code", "ANGEL_ONE_CLIENT_CODE"),
+        "password": _get_secret("angel_one", "password", "ANGEL_ONE_PASSWORD"),
+        "totp_secret": _get_secret("angel_one", "totp_secret", "ANGEL_ONE_TOTP_SECRET"),
+    }
+    config["ready"] = all(config.values())
+    return config
+
+
+def _get_angel_client():
+    global _ANGEL_CLIENT
+    config = _get_angel_config()
+    if not config["ready"] or SmartConnect is None or pyotp is None:
+        return None
+
+    if _ANGEL_CLIENT is not None:
+        return _ANGEL_CLIENT
+
+    try:
+        client = SmartConnect(api_key=config["api_key"])
+        totp = pyotp.TOTP(config["totp_secret"]).now()
+        session = client.generateSession(config["client_code"], config["password"], totp)
+        if not session or not session.get("status"):
+            print(f"Angel One login failed: {session}")
+            return None
+        _ANGEL_CLIENT = client
+        return _ANGEL_CLIENT
+    except Exception as e:
+        print(f"Angel One login error: {e}")
+        return None
+
+
+@lru_cache(maxsize=1)
+def _load_angel_instruments():
+    response = requests.get(ANGEL_MASTER_URL, timeout=30)
+    response.raise_for_status()
+    instruments = pd.DataFrame(response.json())
+    instruments["name_clean"] = instruments["name"].astype(str).str.upper()
+    instruments["symbol_clean"] = instruments["symbol"].astype(str).str.upper()
+    return instruments
+
+
+def _base_symbol(yahoo_symbol):
+    symbol = str(yahoo_symbol).upper().strip()
+    if symbol.startswith("^"):
+        return symbol
+    return symbol.replace(".NS", "").replace(".BO", "")
+
+
+def _find_angel_instrument(yahoo_symbol):
+    symbol = _base_symbol(yahoo_symbol)
+    if symbol.startswith("^"):
+        return None
+
+    try:
+        instruments = _load_angel_instruments()
+        nse = instruments[instruments["exch_seg"].eq("NSE")].copy()
+        exact_symbol = nse[nse["symbol_clean"].eq(f"{symbol}-EQ")]
+        if not exact_symbol.empty:
+            row = exact_symbol.iloc[0]
+        else:
+            exact_name = nse[nse["name_clean"].eq(symbol)]
+            if exact_name.empty:
+                return None
+            row = exact_name.iloc[0]
+
+        return {
+            "exchange": row["exch_seg"],
+            "tradingsymbol": row["symbol"],
+            "symboltoken": str(row["token"]),
+        }
+    except Exception as e:
+        print(f"Angel One instrument lookup failed for {yahoo_symbol}: {e}")
+        return None
+
+
+def _angel_interval(interval):
+    interval_map = {
+        "1m": "ONE_MINUTE",
+        "5m": "FIVE_MINUTE",
+        "15m": "FIFTEEN_MINUTE",
+        "30m": "THIRTY_MINUTE",
+        "1h": "ONE_HOUR",
+        "4h": "ONE_HOUR",
+        "1d": "ONE_DAY",
+    }
+    return interval_map.get(interval)
+
+
+def _angel_period_days(interval):
+    return {
+        "1m": 5,
+        "5m": 30,
+        "15m": 60,
+        "30m": 60,
+        "1h": 120,
+        "4h": 120,
+        "1d": 730,
+    }.get(interval, 30)
+
+
+def _resample_4h(data):
+    return data.resample("4h").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).dropna()
+
+
+def _fetch_angel_stock_data(yahoo_symbol, interval):
+    client = _get_angel_client()
+    instrument = _find_angel_instrument(yahoo_symbol)
+    candle_interval = _angel_interval(interval)
+    if client is None or instrument is None or candle_interval is None:
+        return None
+
+    try:
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        start = now - timedelta(days=_angel_period_days(interval))
+        params = {
+            "exchange": instrument["exchange"],
+            "symboltoken": instrument["symboltoken"],
+            "interval": candle_interval,
+            "fromdate": start.strftime("%Y-%m-%d %H:%M"),
+            "todate": now.strftime("%Y-%m-%d %H:%M"),
+        }
+        response = client.getCandleData(params)
+        candles = response.get("data") if isinstance(response, dict) else None
+        if not candles:
+            return None
+
+        data = pd.DataFrame(candles, columns=["datetime", "open", "high", "low", "close", "volume"])
+        data["datetime"] = pd.to_datetime(data["datetime"])
+        data = data.set_index("datetime")
+        for column in ["open", "high", "low", "close", "volume"]:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+        data = data.dropna(subset=["open", "high", "low", "close"])
+        if interval == "4h":
+            data = _resample_4h(data)
+        return data
+    except Exception as e:
+        print(f"Angel One candle fetch failed for {yahoo_symbol}: {e}")
+        return None
+
+
+def _fetch_angel_quote(yahoo_symbol):
+    client = _get_angel_client()
+    instrument = _find_angel_instrument(yahoo_symbol)
+    if client is None or instrument is None:
+        return None
+
+    try:
+        response = client.ltpData(
+            instrument["exchange"],
+            instrument["tradingsymbol"],
+            instrument["symboltoken"],
+        )
+        payload = response.get("data") if isinstance(response, dict) else None
+        if not payload:
+            return None
+
+        price = float(payload.get("ltp", 0))
+        previous_close = float(payload.get("close", price) or price)
+        change = price - previous_close
+        change_pct = (change / previous_close * 100) if previous_close else 0
+        return {
+            "symbol": yahoo_symbol,
+            "price": round(price, 2),
+            "change": round(change, 2),
+            "change_pct": round(change_pct, 2),
+            "volume": int(payload.get("tradeVolume", 0) or 0),
+            "updated_at": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST"),
+        }
+    except Exception as e:
+        print(f"Angel One quote fetch failed for {yahoo_symbol}: {e}")
+        return None
 
 def fetch_stock_data(yahoo_symbol, interval):
     """
@@ -25,6 +250,10 @@ def fetch_stock_data(yahoo_symbol, interval):
     download_interval = '1h' if interval == '4h' else interval
 
     try:
+        angel_data = _fetch_angel_stock_data(yahoo_symbol, interval)
+        if angel_data is not None and not angel_data.empty:
+            return angel_data
+
         data = yf.download(yahoo_symbol, period=period, interval=download_interval, progress=False)
 
         if data.empty:
@@ -69,13 +298,7 @@ def fetch_stock_data(yahoo_symbol, interval):
             data = data.rename(columns=col_map)
 
         if interval == '4h':
-            data = data.resample('4h').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
+            data = _resample_4h(data)
         return data
     except Exception as e:
         print(f"Error fetching data: {e}")
@@ -162,6 +385,11 @@ def fetch_quote_snapshot(yahoo_symbols):
 
     for yahoo_symbol in yahoo_symbols:
         try:
+            angel_quote = _fetch_angel_quote(yahoo_symbol)
+            if angel_quote:
+                snapshots.append(angel_quote)
+                continue
+
             ticker = yf.Ticker(yahoo_symbol)
             intraday = ticker.history(period='1d', interval='1m')
             daily = ticker.history(period='5d', interval='1d')
